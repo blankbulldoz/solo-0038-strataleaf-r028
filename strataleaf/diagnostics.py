@@ -1,5 +1,6 @@
 from .codec import digest, field, loads, scalar_token
 from .mvcc import visible_rows
+from .quotas import live_usage, stored_usage
 
 
 class Diagnostics:
@@ -12,7 +13,8 @@ class Diagnostics:
             integrity = [row[0] for row in connection.execute("PRAGMA integrity_check" if deep else "PRAGMA quick_check")]
             references = [tuple(row) for row in connection.execute("PRAGMA foreign_key_check")]
             counts = {table: connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
-                      for table in ("collections", "versions", "commits", "index_defs", "index_values", "pins", "consumers")}
+                      for table in ("collections", "versions", "commits", "index_defs", "index_values", "pins", "consumers",
+                                    "quota_groups", "collection_quotas", "quota_usage")}
             revisions = [row[0] for row in connection.execute("SELECT rev FROM commits WHERE rev>? ORDER BY rev", (floor,))]
             issues = []
             if revisions != list(range(floor + 1, head + 1)):
@@ -41,6 +43,11 @@ class Diagnostics:
                 actual = {tuple(row) for row in connection.execute("SELECT collection,name,token,key FROM index_values")}
                 if expected != actual:
                     issues.append("index entries differ from current visible documents")
+                live = live_usage(connection)
+                stored = stored_usage(connection)
+                if ({key: value for key, value in live.items() if value != (0, 0)}
+                        != {key: value for key, value in stored.items() if value != (0, 0)}):
+                    issues.append("quota usage counters differ from live documents")
             return {"ok": not issues, "issues": issues, "head": head, "floor": floor,
                     "database_id": self.store.get("database_id"), "mode": self.store.get("mode"),
                     "counts": counts, "sqlite": integrity, "foreign_keys": references}

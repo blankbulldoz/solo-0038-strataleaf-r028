@@ -7,6 +7,7 @@ from .indexes import Indexes
 from .mvcc import read_record
 from .patch import patch_document
 from .query import QueryEngine
+from .quotas import Quotas
 from .replica import Replication
 from .retention import Retention
 from .storage import Storage
@@ -27,7 +28,9 @@ class Database:
         self.aggregates = Aggregates(self._store)
         self.transfer = Transfer(self._store)
         self.diagnostics = Diagnostics(self._store)
+        self.quotas = Quotas(self._store)
         self._queries = QueryEngine(self._store)
+        self.quotas.reconcile()
 
     @property
     def revision(self):

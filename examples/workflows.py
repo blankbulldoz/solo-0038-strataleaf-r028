@@ -1,8 +1,9 @@
 import json
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
-from strataleaf import Database, Archives, Conflict, InvalidDocument, InvalidCursor, ReadOnly, SnapshotTooOld, ReplicationError
+from strataleaf import Database, Archives, Conflict, InvalidDocument, InvalidCursor, ReadOnly, SnapshotTooOld, ReplicationError, QuotaExceeded
 
 SCHEMA = {"fields": {"region": "string", "sequence": "integer", "code": "string"}, "required": ["region", "sequence"]}
 
@@ -145,6 +146,79 @@ def run(flow):
                           "duplicate": rejected(lambda: db.transfer.import_lines("copy_segments", exported["lines"]), Conflict)}
                 if len(db.query("copy_segments").records) != 6:
                     raise RuntimeError("logical import differs")
+            elif flow == "quota":
+                db.catalog.create("marks")
+                db.batch("seed_marks").put("marks", "m0", {"segment": "seg_00"}).put(
+                    "marks", "m1", {"segment": "seg_01"}).put("marks", "m_utf8", {"segment": "东部区块"}).commit()
+                db.quotas.set_group("shared", max_documents=12, max_bytes=10 ** 6)
+                db.quotas.set_collection("segments", max_documents=8, group="shared")
+                db.quotas.set_collection("marks", max_documents=5, group="shared")
+                configured = db.quotas.usage()
+                canonical = lambda document: json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                marks_bytes = sum(len(canonical(document).encode("utf-8"))
+                                  for document in ({"segment": "seg_00"}, {"segment": "seg_01"}, {"segment": "东部区块"}))
+                if configured["collections"]["marks"]["bytes"] != marks_bytes or not db.quotas.reconcile()["consistent"]:
+                    raise RuntimeError("logical UTF-8 byte accounting differs from stored bodies")
+                over = rejected(lambda: db.batch().put("segments", "x1", {"region": "e", "sequence": 1}).put(
+                    "segments", "x2", {"region": "e", "sequence": 2}).put(
+                    "segments", "x3", {"region": "e", "sequence": 3}).commit(), QuotaExceeded)
+                idempotent = db.batch("quota_idem").put("segments", "seg_06", {"region": "east", "sequence": 6}).commit()
+                replay = db.batch("quota_idem").put("segments", "seg_06", {"region": "east", "sequence": 6}).commit()
+                conditional = rejected(lambda: db.batch().put("segments", "seg_07", {"region": "e", "sequence": 7}, expected=999).commit(), Conflict)
+                after_failures = db.quotas.usage()
+                if not replay.replayed or after_failures["collections"]["segments"]["documents"] != 7:
+                    raise RuntimeError("replay or failed conditional write changed quota usage")
+                group_bytes = after_failures["groups"]["shared"]["bytes"]
+                db.quotas.set_group("shared", max_documents=12, max_bytes=group_bytes - 1)
+                grow = rejected(lambda: db.batch().put("marks", "m2", {"segment": "seg_02"}).commit(), QuotaExceeded)
+                shrink = db.batch().put("segments", "seg_06", {"region": "e", "sequence": 6}, expected=idempotent.revision).commit()
+                deleted = db.batch().delete("marks", "m1").commit()
+                db.quotas.set_collection("segments", max_documents=5, group="shared")
+                breach = rejected(lambda: db.batch().delete("marks", "m0").put(
+                    "segments", "seg_08", {"region": "w", "sequence": 8}).commit(), QuotaExceeded)
+                capped = db.quotas.usage()
+                db.quotas.set_group("shared", max_documents=capped["groups"]["shared"]["documents"], max_bytes=10 ** 6)
+                moved = db.batch().delete("segments", "seg_05").delete("segments", "seg_06").put("marks", "m9", {"segment": "seg_09"}).commit()
+                released = db.quotas.usage()
+                refill = db.batch().put("marks", "m10", {"segment": "seg_10"}).commit()
+                cap = rejected(lambda: db.batch().put("marks", "m11", {"segment": "seg_11"}).commit(), QuotaExceeded)
+                if released["groups"]["shared"]["documents"] != capped["groups"]["shared"]["documents"] - 1:
+                    raise RuntimeError("cross-collection net release was not admitted at the shared cap")
+                db.archives.backup(folder / "quota_base.db")
+                Archives.restore(folder / "quota_base.db", folder / "quota_replica.db", follower=True)
+                db.batch().delete("marks", "m10").commit()
+                db.quotas.set_collection("marks", max_documents=6, group="shared")
+                with Database(folder / "quota_replica.db") as replica:
+                    applied = replica.replication.apply(db.replication.export(replica.revision))
+                    replica_usage, source_usage = replica.quotas.usage(), db.quotas.usage()
+                    readonly = rejected(lambda: replica.quotas.set_group("shared", max_documents=1), ReadOnly)
+                    if (replica_usage["revision"], replica_usage["quota_version"]) != (source_usage["revision"], source_usage["quota_version"]) \
+                            or replica_usage["collections"] != source_usage["collections"] or replica_usage["groups"] != source_usage["groups"] \
+                            or not replica.quotas.reconcile()["consistent"]:
+                        raise RuntimeError("replica quota state differs from source")
+                raw = sqlite3.connect(folder / "source.db")
+                try:
+                    raw.execute("DELETE FROM quota_usage")
+                    raw.commit()
+                finally:
+                    raw.close()
+                with Database(folder / "source.db") as reopened:
+                    reopen = reopened.quotas.last_reconcile
+                    if reopen["consistent"] or set(reopen["corrected"]) != {"segments", "marks"} \
+                            or reopened.quotas.usage()["collections"] != db.quotas.usage()["collections"]:
+                        raise RuntimeError("reopen reconciliation did not restore usage counters")
+                if not db.quotas.reconcile()["consistent"] or not db.diagnostics.inspect(True)["ok"]:
+                    raise RuntimeError("quota counters diverged from live documents")
+                output = {"configured": configured, "over_admission": over,
+                          "idempotent": {"commit": idempotent.__dict__, "replay": replay.__dict__},
+                          "conditional_failure": conditional, "usage_after_failures": after_failures,
+                          "lowered_below_usage": {"group_max_bytes": group_bytes - 1, "grow_rejected": grow,
+                                                  "shrink": shrink.__dict__, "delete": deleted.__dict__},
+                          "no_new_breach": breach,
+                          "net_release": {"capped_at": capped["groups"]["shared"]["documents"], "moved": moved.__dict__,
+                                          "group_after": released["groups"]["shared"], "refill": refill.__dict__, "cap_rejected": cap},
+                          "replica": {"applied": applied, "usage": replica_usage, "readonly": readonly},
+                          "reopen_reconcile": reopen, "final_usage": db.quotas.usage()}
             else:
                 raise ValueError("unknown example workflow: " + flow)
             print(json.dumps({"workflow": flow, "result": output}, ensure_ascii=False, sort_keys=True, default=str))

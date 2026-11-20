@@ -4,6 +4,7 @@ from .codec import digest, dumps, key as checked_key, loads, name
 from .errors import Conflict, InvalidDocument, NotFound
 from .indexes import refresh_document
 from .mvcc import latest_row
+from .quotas import apply_deltas, check_admission, delta_tally
 from .schema import validate_document
 
 
@@ -69,6 +70,7 @@ class WriteBatch:
                         self.state = "committed"
                         return CommitResult(prior["rev"], prior["count"], True)
                 head = int(self.store.get("head"))
+                prepared = []
                 for op in self.operations:
                     schema = connection.execute("SELECT schema FROM collections WHERE name=?", (op["collection"],)).fetchone()
                     if schema is None:
@@ -79,12 +81,16 @@ class WriteBatch:
                         raise Conflict(f"revision conflict for {op['collection']}/{op['key']}: expected {op['expected']}, found {current}")
                     if op["document"] is not None:
                         validate_document(op["document"], loads(schema[0]))
-                revision = head + 1
-                for op in self.operations:
                     body = dumps(op["document"]) if op["document"] is not None else None
+                    prepared.append((op, old["body"] if old is not None else None, body))
+                tally = delta_tally((op["collection"], old_body, body) for op, old_body, body in prepared)
+                check_admission(connection, tally)
+                revision = head + 1
+                for op, _old_body, body in prepared:
                     connection.execute("INSERT INTO versions VALUES (?,?,?,?,?)",
                                        (op["collection"], op["key"], revision, body, op["expires_at"]))
                     refresh_document(connection, op["collection"], op["key"], op["document"])
+                apply_deltas(connection, tally)
                 payload = {"revision": revision, "operations": self.operations}
                 connection.execute("INSERT INTO commits VALUES (?,?,?,?)",
                                    (revision, dumps(payload), self.request_key, fingerprint))

@@ -1,6 +1,8 @@
 # 数据与兼容边界
 
-物理表包括 meta、collections、versions、commits、receipts、index_defs、index_values、pins、consumers。versions 的主键为集合、键、修订；body 的 SQL NULL 表示删除，JSON null 只能作为文档字段。collections 保存当前模式；index_values 是当前 head 的投影。commits 保存完整的操作序列；receipts 保存不受历史回收影响的请求摘要与结果。幂等键不能被不同操作复用，回放不重新执行前置条件。
+物理表包括 meta、collections、versions、commits、receipts、index_defs、index_values、pins、consumers、quota_groups、collection_quotas、quota_usage。versions 的主键为集合、键、修订；body 的 SQL NULL 表示删除，JSON null 只能作为文档字段。collections 保存当前模式；index_values 是当前 head 的投影。commits 保存完整的操作序列；receipts 保存不受历史回收影响的请求摘要与结果。幂等键不能被不同操作复用，回放不重新执行前置条件。
+
+配额统计只计每个键当前非墓碑版本：活文档数与逻辑字节（存储规范 JSON 正文的 UTF-8 字节数），历史版本与墓碑不占额度。collection_quotas 保存集合上限与所属共享组，quota_groups 保存组成员共用的上限；quota_usage 随每次提交在同一事务内按整批净增量维护。批次准入按提交后的投影用量判断：投影不得超过 max（限额， 当前用量），即已超限指标不得继续恶化、未超限指标不得新突破；删除、缩小正文与跨集合搬移按净效果核算。限额调整递增 meta 中的 quota_version，与文档修订相互独立；用量查询同时报告对应提交修订与配额版本。每次打开数据库会按存储正文重算 quota_usage 并纠正偏差，使早期无配额格式的文件与恢复文件立即可核账。副本不接收限额调整，配额配置与版本随提交包安装，用量随应用提交同步。
 
 floor 是仍可读取的最早修订，不代表每条物理版本的最小修订；每个键在 floor 之前的最后版本可能是构造 floor 读视图的基准，必须保留。commits 仅需保存大于 floor 的提交，消费者从自己的 ack 之后读取。pin 与消费者位置不能低于现存 floor。
 

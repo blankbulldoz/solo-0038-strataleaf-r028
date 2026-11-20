@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS index_values (
 CREATE INDEX IF NOT EXISTS index_document ON index_values(collection,key);
 CREATE TABLE IF NOT EXISTS pins (name TEXT PRIMARY KEY, rev INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS consumers (name TEXT PRIMARY KEY, ack INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS quota_groups (name TEXT PRIMARY KEY, max_documents INTEGER, max_bytes INTEGER);
+CREATE TABLE IF NOT EXISTS collection_quotas (
+ collection TEXT NOT NULL PRIMARY KEY REFERENCES collections(name),
+ max_documents INTEGER, max_bytes INTEGER, quota_group TEXT REFERENCES quota_groups(name));
+CREATE TABLE IF NOT EXISTS quota_usage (
+ collection TEXT NOT NULL PRIMARY KEY REFERENCES collections(name),
+ documents INTEGER NOT NULL, bytes INTEGER NOT NULL);
 """
 
 
@@ -40,7 +47,8 @@ class Storage:
         self.connection.executescript(DDL)
         with self.atomic():
             initial = {"format": "1", "head": "0", "floor": "0", "database_id": str(uuid.uuid4()),
-                       "cursor_secret": secrets.token_hex(32), "mode": "primary", "upstream": "", "catalog_epoch": "0"}
+                       "cursor_secret": secrets.token_hex(32), "mode": "primary", "upstream": "", "catalog_epoch": "0",
+                       "quota_version": "0"}
             for key, value in initial.items():
                 self.connection.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", (key, value))
             if self.get("format") != "1":

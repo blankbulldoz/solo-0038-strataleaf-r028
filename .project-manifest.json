@@ -19,7 +19,8 @@
       "同一历史读版本完成分组和数值计算",
       "读后修改受版本前置条件保护",
       "物理完整性与逻辑引用一致性可观察",
-      "外部文档流验证后整批导入"
+      "外部文档流验证后整批导入",
+      "集合与共享组配额按提交净用量准入"
     ]
   },
   "project_shape": "backend",
@@ -173,6 +174,18 @@
       "owned_facts": "文档流边界与原子导入",
       "consumers": [
         "transfer"
+      ]
+    },
+    {
+      "id": "quota",
+      "path": "strataleaf/quotas.py",
+      "responsibility": "集合与共享组限额、用量计数与核账",
+      "owned_facts": "集合与共享组限额、用量计数与核账",
+      "consumers": [
+        "commit",
+        "replica",
+        "inspect",
+        "quota"
       ]
     },
     {
@@ -513,6 +526,25 @@
       "success": "外部文档流验证后整批导入",
       "failure": "重复键整体拒绝",
       "verification": "python3 -m examples.workflows transfer"
+    },
+    {
+      "id": "quota",
+      "name": "存储配额",
+      "entry": "Database.quotas.usage",
+      "module_ids": [
+        "quota",
+        "commit",
+        "replica",
+        "storage"
+      ],
+      "steps": [
+        "输入校验与读取已有事实",
+        "集合与共享组限额、用量计数与核账",
+        "形成可观察结果"
+      ],
+      "success": "集合与共享组配额按提交净用量准入",
+      "failure": "超限或恶化已超限指标的提交整体拒绝",
+      "verification": "python3 -m examples.workflows quota"
     }
   ],
   "complexity": {

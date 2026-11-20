@@ -19,5 +19,8 @@ class InvalidCursor(DatabaseError):
 class ReadOnly(DatabaseError):
     pass
 
+class QuotaExceeded(DatabaseError):
+    pass
+
 class ReplicationError(DatabaseError):
     pass
